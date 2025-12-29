@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>OCR Pro Module</title>
+<style>
+:root{
+ --bg:#0b0f1a;--panel:#111827;--panel2:#0f172a;--accent:#6366f1;--accent2:#22d3ee;--text:#e5e7eb;--muted:#9ca3af;
+ --radius:16px;--radius-sm:10px;--speed:.25s
+}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:radial-gradient(1200px 600px at 10% -10%,#1e293b 0%,transparent 60%),var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Roboto,sans-serif;display:flex;align-items:center;justify-content:center}
+
+.app{width:100%;max-width:1100px;padding:28px}
+
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.brand{display:flex;gap:14px;align-items:center}
+.logo{width:52px;height:52px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;box-shadow:0 10px 30px rgba(99,102,241,.35)}
+.logo svg{opacity:.9}
+.title{font-size:20px;font-weight:700}
+.subtitle{font-size:13px;color:var(--muted)}
+
+.toolbar{display:flex;gap:10px}
+.btn{height:42px;padding:0 16px;border-radius:14px;border:1px solid rgba(255,255,255,.06);background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));color:var(--text);display:flex;gap:8px;align-items:center;cursor:pointer;transition:transform var(--speed),box-shadow var(--speed),background var(--speed)}
+.btn:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(0,0,0,.35)}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none}
+
+.layout{display:grid;grid-template-columns:320px 1fr;gap:18px}
+
+.panel{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);padding:18px}
+
+.queue{display:flex;flex-direction:column;gap:12px}
+.task{padding:12px;border-radius:12px;background:rgba(0,0,0,.25);display:flex;gap:12px;align-items:center;animation:in .3s ease}
+.task .state{width:10px;height:10px;border-radius:50%;background:#64748b}
+.task.processing .state{background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 0 0 4px rgba(99,102,241,.25)}
+.task.done .state{background:#22c55e}
+.task.error .state{background:#ef4444}
+.task .name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.viewer{display:flex;flex-direction:column;height:100%}
+.viewer-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.viewer-actions{display:flex;gap:8px}
+
+.output{flex:1;background:var(--panel2);border-radius:14px;padding:16px;overflow:auto;font-size:13px;line-height:1.6;white-space:pre-wrap}
+
+.progress{height:8px;border-radius:6px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:12px}
+.progress span{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .2s}
+
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+<div class="app">
+
+<header class="header">
+ <div class="brand">
+  <div class="logo">
+   <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M4 6h16v12H4z" stroke="white" opacity=".8"/><path d="M7 10h10M7 14h6" stroke="white" opacity=".8"/></svg>
+  </div>
+  <div>
+   <div class="title">OCR Professional Module</div>
+   <div class="subtitle">Traitement automatique · Zéro saisie · Flux continu</div>
+  </div>
+ </div>
+ <div class="toolbar">
+  <label class="btn primary">
+   <input id="files" type="file" multiple accept="image/*,.pdf" />
+   Importer fichiers
+  </label>
+  <button id="export" class="btn">Exporter texte</button>
+  <button id="clear" class="btn">Réinitialiser</button>
+ </div>
+</header>
+
+<section class="layout">
+
+<aside class="panel">
+ <strong>File de traitement</strong>
+ <div id="queue" class="queue"></div>
+</aside>
+
+<main class="panel viewer">
+ <div class="viewer-header">
+  <strong>Résultat OCR</strong>
+  <div class="viewer-actions">
+   <button id="copy" class="btn">Copier</button>
+   <button id="download" class="btn">Télécharger</button>
+  </div>
+ </div>
+ <div id="output" class="output">Aucun fichier traité.</div>
+ <div class="progress"><span id="bar"></span></div>
+</main>
+
+</section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+<script src="https://mozilla.github.io/pdf.js/build/pdf.js"></script>
+<script>
+const queueEl = document.getElementById('queue');
+const outputEl = document.getElementById('output');
+const bar = document.getElementById('bar');
+let results = [];
+
+// Compatibility wrapper for different tesseract.js builds
+// Universal worker shim — always expose a .recognize(img) function
+const worker = (function(){
+  // helper logger
+  const logger = m => { if(m && m.progress!=null){ bar.style.width = Math.round(m.progress*100) + '%'; } };
+
+  // If modern createWorker exists, prefer it but also expose a .recognize wrapper that works
+  if(window.Tesseract && typeof Tesseract.createWorker === 'function'){
+    try{
+      const w = Tesseract.createWorker({ logger });
+      // return an object that forwards recognize calls; some builds only expose recognize after init
+      return {
+        _nativeWorker: w,
+        _useWorker: true,
+        load: (...a)=>w.load(...a),
+        loadLanguage: (...a)=>w.loadLanguage(...a),
+        initialize: (...a)=>w.initialize(...a),
+        terminate: (...a)=>w.terminate(...a),
+        // ensure recognize always callable: if worker has recognize, call it; else use global Tesseract as fallback
+        recognize: async (img, opts={}) => {
+          if(typeof w.recognize === 'function'){
+            return await w.recognize(img, opts);
+          }
+          if(typeof Tesseract.recognize === 'function'){
+            return await Tesseract.recognize(img, 'fra', { logger, ...opts });
+          }
+          throw new Error('Aucune méthode de reconnaissance disponible');
+        }
+      };
+    }catch(e){
+      // fall through to global shim
+      console.warn('createWorker init failed, falling back to global recognize', e);
+    }
+  }
+
+  // Fallback shim using global Tesseract.recognize
+  if(window.Tesseract && typeof Tesseract.recognize === 'function'){
+    return {
+      _shim: true,
+      recognize: async (img, opts={}) => {
+        return await Tesseract.recognize(img, 'fra', { logger, ...opts });
+      },
+      load: async ()=>{},
+      loadLanguage: async ()=>{},
+      initialize: async ()=>{},
+      terminate: async ()=>{}
+    };
+  }
+
+  throw new Error('Tesseract.js introuvable. Vérifie la balise <script> CDN.');
+})();
+
+(async()=>{
+  try{
+    if(typeof worker.load === 'function') await worker.load();
+    if(typeof worker.loadLanguage === 'function') await worker.loadLanguage('fra');
+    if(typeof worker.initialize === 'function') await worker.initialize('fra');
+  }catch(e){
+    console.warn('Erreur init Tesseract', e);
+  }
+})();
+
+function addTask(name){
+ const el=document.createElement('div');
+ el.className='task processing';
+ el.innerHTML=`<div class="state"></div><div class="name">${name}</div>`;
+ queueEl.prepend(el);
+ return el;
+}
+
+async function ocrRecognize(canvas){
+  // Universal recognizer: prefers worker.recognize, falls back to Tesseract.recognize
+  if(worker && typeof worker.recognize === 'function'){
+    const res = await worker.recognize(canvas);
+    return (res && res.data && res.data.text) ? res.data.text : (res && res.text) || '';
+  } else if(window.Tesseract && typeof Tesseract.recognize === 'function'){
+    const res = await Tesseract.recognize(canvas, 'fra', { logger: m => { if(m && m.progress!=null){ bar.style.width = Math.round(m.progress*100) + '%'; } } });
+    return (res && res.data && res.data.text) ? res.data.text : (res && res.text) || '';
+  } else {
+    throw new Error('Tesseract non disponible');
+  }
+}
+
+async function processImage(file){
+ const task=addTask(file.name);
+ try{
+  const img=new Image(); img.src=URL.createObjectURL(file);
+  await img.decode();
+  const c=document.createElement('canvas'); c.width=img.width; c.height=img.height;
+  c.getContext('2d').drawImage(img,0,0);
+  const text = await ocrRecognize(c);
+  task.classList.remove('processing');task.classList.add('done');
+  results.push(text);outputEl.textContent=text;
+ }catch(e){
+  task.classList.remove('processing');task.classList.add('error');
+  console.error(e); outputEl.textContent = 'Erreur OCR: '+(e.message||e);
+ }
+}
+
+async function processPDF(file){
+ const task=addTask(file.name);
+ try{
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  let full='';
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const vp=page.getViewport({scale:2});
+    const c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;
+    await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;
+    const text = await ocrRecognize(c);
+    full+=text+'';
+  }
+  task.classList.remove('processing');task.classList.add('done');
+  results.push(full);outputEl.textContent=full;
+ }catch(e){
+  task.classList.remove('processing');task.classList.add('error');
+  console.error(e); outputEl.textContent = 'Erreur OCR: '+(e.message||e);
+ }
+}
+
+
+files.onchange=e=>{[...e.target.files].forEach(f=>f.type==='application/pdf'?processPDF(f):processImage(f));files.value=''};
+copy.onclick=()=>navigator.clipboard.writeText(outputEl.textContent);
+download.onclick=()=>{const b=new Blob([results.join('')]);const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='ocr.txt';a.click()};
+clear.onclick=()=>{queueEl.innerHTML='';outputEl.textContent='Aucun fichier traité.';results=[];bar.style.width='0%'};
+</script>
+</body>
+</html>
